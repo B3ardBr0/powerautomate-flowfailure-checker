@@ -1,0 +1,25 @@
+# PowerShell Scripts .gitignore
+
+# CSV output files
+FailedFlows_*.csv
+
+# Log files
+*.log
+*.txt
+
+# PowerShell transcript files
+Transcript_*.txt
+
+# Temporary files
+*.tmp
+~$*
+
+# Environment-specific files
+.env
+credentials.json
+
+# Windows thumbnail cache
+Thumbs.db
+
+# macOS files
+.DS_Store
