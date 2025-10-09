@@ -144,8 +144,8 @@ foreach ($environment in $environments) {
                 Write-Host "  [$processedFlows/$envFlowCount] Checking: $($flow.DisplayName)" -ForegroundColor Gray
 
                 try {
-                    # Get flow runs
-                    $runs = Get-AdminFlowRunHistory -EnvironmentName $environment.EnvironmentName -FlowName $flow.FlowName
+                    # Get flow runs (using Get-FlowRun as Get-AdminFlowRunHistory doesn't exist)
+                    $runs = Get-FlowRun -EnvironmentName $environment.EnvironmentName -FlowName $flow.FlowName
 
                     if ($runs) {
                         # Filter for failed runs in the time window
