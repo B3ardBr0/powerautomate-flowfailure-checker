@@ -7,8 +7,17 @@
     that have failed in the specified time window. It requires Power Platform Administrator
     permissions and the Microsoft.PowerApps.Administration.PowerShell module.
 
+    By default, uses Get-AdminFlow to scan all environments as an administrator.
+    Optionally, can also include user-owned flows via Get-Flow to catch any flows
+    not visible through admin cmdlets.
+
 .PARAMETER Hours
     Number of hours to look back for failed runs (default: 24)
+
+.PARAMETER IncludeUserFlows
+    When specified, also checks flows you own or have access to via Get-Flow.
+    This can help catch flows in the default environment that may not appear
+    in Get-AdminFlow results. Duplicates are automatically skipped.
 
 .EXAMPLE
     .\check_failed_flows.ps1
@@ -18,6 +27,10 @@
     .\check_failed_flows.ps1 -Hours 720
     Checks for flows that failed in the last 30 days (720 hours) across all environments
 
+.EXAMPLE
+    .\check_failed_flows.ps1 -IncludeUserFlows
+    Checks admin flows across all environments AND user-owned flows
+
 .NOTES
     Requires: Microsoft.PowerApps.Administration.PowerShell and Microsoft.PowerApps.PowerShell modules
     Install with:
@@ -25,11 +38,16 @@
         Install-Module -Name Microsoft.PowerApps.PowerShell
 
     Permissions: Power Platform Administrator or Dynamics 365 Administrator role required
+
+    Note: If you're missing flows from your default environment, try using -IncludeUserFlows
 #>
 
 param(
     [Parameter(Mandatory=$false)]
-    [int]$Hours = 24
+    [int]$Hours = 24,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$IncludeUserFlows = $false
 )
 
 # Function to check and install required modules
@@ -166,6 +184,76 @@ foreach ($environment in $environments) {
     }
     catch {
         Write-Warning "  Could not retrieve flows for environment: $($environment.DisplayName). Error: $($_.Exception.Message)"
+    }
+
+    Write-Host ""
+}
+
+# Optionally check user-owned flows (to catch flows not visible via Get-AdminFlow)
+if ($IncludeUserFlows) {
+    Write-Host "=== Checking User-Owned Flows ===" -ForegroundColor Cyan
+    Write-Host "Retrieving flows you own or have access to..." -ForegroundColor Yellow
+
+    try {
+        $userFlows = Get-Flow
+
+        if ($userFlows) {
+            Write-Host "Found $($userFlows.Count) user flow(s)" -ForegroundColor Green
+            $processedUserFlows = 0
+
+            foreach ($flow in $userFlows) {
+                $processedUserFlows++
+                Write-Host "[$processedUserFlows/$($userFlows.Count)] Checking: $($flow.DisplayName)" -ForegroundColor Gray
+
+                # Skip if already processed via admin check
+                $alreadyProcessed = $failedFlowDetails | Where-Object { $_.FlowID -eq $flow.FlowName }
+                if ($alreadyProcessed) {
+                    Write-Host "  [SKIPPED] Already checked via admin flow" -ForegroundColor DarkGray
+                    continue
+                }
+
+                try {
+                    # Get flow runs
+                    $runs = Get-FlowRun -FlowName $flow.FlowName
+
+                    if ($runs) {
+                        # Filter for failed runs in the time window
+                        $failedRuns = $runs | Where-Object {
+                            $_.Status -eq 'Failed' -and
+                            [DateTime]$_.StartTime -gt $timeThreshold
+                        }
+
+                        if ($failedRuns.Count -gt 0) {
+                            $totalFailedFlows++
+                            $totalFlows++
+
+                            $lastFailureTime = ($failedRuns | Sort-Object StartTime -Descending | Select-Object -First 1).StartTime
+
+                            $failedFlowDetails += [PSCustomObject]@{
+                                Environment = "(User Flow)"
+                                EnvironmentID = "N/A"
+                                FlowName = $flow.DisplayName
+                                FlowID = $flow.FlowName
+                                Enabled = $flow.Enabled
+                                FailureCount = $failedRuns.Count
+                                LastFailure = $lastFailureTime
+                            }
+
+                            Write-Host "  [FAILED] $($failedRuns.Count) failure(s) - Last: $lastFailureTime" -ForegroundColor Red
+                        }
+                    }
+                }
+                catch {
+                    Write-Warning "  Could not retrieve runs for flow: $($flow.DisplayName). Error: $($_.Exception.Message)"
+                }
+            }
+        }
+        else {
+            Write-Host "No user flows found" -ForegroundColor Gray
+        }
+    }
+    catch {
+        Write-Warning "Failed to retrieve user flows. Error: $($_.Exception.Message)"
     }
 
     Write-Host ""
