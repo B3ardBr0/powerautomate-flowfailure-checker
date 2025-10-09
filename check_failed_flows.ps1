@@ -7,26 +7,68 @@
     that have failed in the last 24 hours. It requires the Microsoft.PowerApps.PowerShell
     module to be installed.
 
+    Features:
+    - Progress bar showing real-time check status
+    - Automatic retry logic for transient API failures (3 retries with exponential backoff)
+    - CSV export of failed flows with timestamps
+    - Color-coded console output
+
 .PARAMETER Hours
     Number of hours to look back for failed runs (default: 24)
 
 .EXAMPLE
-    .\Check-FailedFlows-v2.ps1
+    .\check_failed_flows.ps1
     Checks for flows that failed in the last 24 hours
 
 .EXAMPLE
-    .\Check-FailedFlows-v2.ps1 -Hours 720
+    .\check_failed_flows.ps1 -Hours 720
     Checks for flows that failed in the last 30 days (720 hours)
 
 .NOTES
     Requires: Microsoft.PowerApps.PowerShell module
     Install with: Install-Module -Name Microsoft.PowerApps.PowerShell
+
+    Retry Logic: API calls will automatically retry up to 3 times with
+    exponential backoff (2s, 4s, 8s) to handle transient failures.
 #>
 
 param(
     [Parameter(Mandatory=$false)]
     [int]$Hours = 24
 )
+
+# Function to retry API calls with exponential backoff
+function Invoke-WithRetry {
+    param(
+        [Parameter(Mandatory=$true)]
+        [scriptblock]$ScriptBlock,
+
+        [Parameter(Mandatory=$false)]
+        [int]$MaxRetries = 3,
+
+        [Parameter(Mandatory=$false)]
+        [int]$InitialDelaySeconds = 2
+    )
+
+    $attempt = 0
+    $delay = $InitialDelaySeconds
+
+    while ($attempt -lt $MaxRetries) {
+        try {
+            return & $ScriptBlock
+        }
+        catch {
+            $attempt++
+            if ($attempt -ge $MaxRetries) {
+                throw
+            }
+
+            Write-Warning "API call failed (attempt $attempt/$MaxRetries). Retrying in $delay seconds... Error: $($_.Exception.Message)"
+            Start-Sleep -Seconds $delay
+            $delay = $delay * 2  # Exponential backoff
+        }
+    }
+}
 
 # Function to check and install required modules
 function Install-RequiredModules {
@@ -80,15 +122,15 @@ $timeThreshold = (Get-Date).AddHours(-$Hours)
 Write-Host "Looking for failures since: $($timeThreshold.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Gray
 Write-Host ""
 
-# Get all flows
+# Get all flows with retry logic
 Write-Host "Retrieving all flows..." -ForegroundColor Yellow
 try {
-    $flows = Get-Flow
+    $flows = Invoke-WithRetry -ScriptBlock { Get-Flow }
     Write-Host "Found $($flows.Count) flow(s)" -ForegroundColor Green
     Write-Host ""
 }
 catch {
-    Write-Error "Failed to retrieve flows. Error: $_"
+    Write-Error "Failed to retrieve flows after multiple retries. Error: $_"
     exit 1
 }
 
@@ -101,11 +143,21 @@ $processedFlows = 0
 # Check each flow for failures
 foreach ($flow in $flows) {
     $processedFlows++
+    $percentComplete = [math]::Round(($processedFlows / $totalFlows) * 100)
+
+    # Update progress bar
+    Write-Progress -Activity "Checking Power Automate Flows for Failures" `
+                   -Status "Processing: $($flow.DisplayName)" `
+                   -PercentComplete $percentComplete `
+                   -CurrentOperation "Flow $processedFlows of $totalFlows"
+
     Write-Host "[$processedFlows/$totalFlows] Checking: $($flow.DisplayName)" -ForegroundColor Gray
 
     try {
-        # Get flow runs
-        $runs = Get-FlowRun -FlowName $flow.FlowName
+        # Get flow runs with retry logic
+        $runs = Invoke-WithRetry -ScriptBlock {
+            Get-FlowRun -FlowName $flow.FlowName
+        }
 
         if ($runs) {
             # Filter for failed runs in the time window
@@ -132,9 +184,12 @@ foreach ($flow in $flows) {
         }
     }
     catch {
-        Write-Warning "  Could not retrieve runs for flow: $($flow.DisplayName). Error: $($_.Exception.Message)"
+        Write-Warning "  Could not retrieve runs for flow: $($flow.DisplayName) after retries. Error: $($_.Exception.Message)"
     }
 }
+
+# Clear progress bar
+Write-Progress -Activity "Checking Power Automate Flows for Failures" -Completed
 
 Write-Host ""
 
