@@ -1,26 +1,30 @@
 <#
 .SYNOPSIS
-    Checks for failed Power Automate flows in the last 24 hours.
+    Checks for failed Power Automate flows across all environments in the last 24 hours.
 
 .DESCRIPTION
-    This script connects to Power Platform and retrieves all flows you own
-    that have failed in the last 24 hours. It requires the Microsoft.PowerApps.PowerShell
-    module to be installed.
+    This script connects to Power Platform and retrieves all flows across all environments
+    that have failed in the specified time window. It requires Power Platform Administrator
+    permissions and the Microsoft.PowerApps.Administration.PowerShell module.
 
 .PARAMETER Hours
     Number of hours to look back for failed runs (default: 24)
 
 .EXAMPLE
-    .\Check-FailedFlows-v2.ps1
-    Checks for flows that failed in the last 24 hours
+    .\check_failed_flows.ps1
+    Checks for flows that failed in the last 24 hours across all environments
 
 .EXAMPLE
-    .\Check-FailedFlows-v2.ps1 -Hours 720
-    Checks for flows that failed in the last 30 days (720 hours)
+    .\check_failed_flows.ps1 -Hours 720
+    Checks for flows that failed in the last 30 days (720 hours) across all environments
 
 .NOTES
-    Requires: Microsoft.PowerApps.PowerShell module
-    Install with: Install-Module -Name Microsoft.PowerApps.PowerShell
+    Requires: Microsoft.PowerApps.Administration.PowerShell and Microsoft.PowerApps.PowerShell modules
+    Install with:
+        Install-Module -Name Microsoft.PowerApps.Administration.PowerShell
+        Install-Module -Name Microsoft.PowerApps.PowerShell
+
+    Permissions: Power Platform Administrator or Dynamics 365 Administrator role required
 #>
 
 param(
@@ -31,6 +35,7 @@ param(
 # Function to check and install required modules
 function Install-RequiredModules {
     $requiredModules = @(
+        'Microsoft.PowerApps.Administration.PowerShell',
         'Microsoft.PowerApps.PowerShell'
     )
 
@@ -80,66 +85,97 @@ $timeThreshold = (Get-Date).AddHours(-$Hours)
 Write-Host "Looking for failures since: $($timeThreshold.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Gray
 Write-Host ""
 
-# Get all flows
-Write-Host "Retrieving all flows..." -ForegroundColor Yellow
+# Get all environments
+Write-Host "Retrieving all environments..." -ForegroundColor Yellow
 try {
-    $flows = Get-Flow
-    Write-Host "Found $($flows.Count) flow(s)" -ForegroundColor Green
+    $environments = Get-AdminPowerAppEnvironment
+    Write-Host "Found $($environments.Count) environment(s)" -ForegroundColor Green
     Write-Host ""
 }
 catch {
-    Write-Error "Failed to retrieve flows. Error: $_"
+    Write-Error "Failed to retrieve environments. Error: $_"
     exit 1
 }
 
 # Initialize counters
-$totalFlows = $flows.Count
+$totalEnvironments = $environments.Count
+$totalFlows = 0
 $totalFailedFlows = 0
 $failedFlowDetails = @()
-$processedFlows = 0
+$processedEnvironments = 0
 
-# Check each flow for failures
-foreach ($flow in $flows) {
-    $processedFlows++
-    Write-Host "[$processedFlows/$totalFlows] Checking: $($flow.DisplayName)" -ForegroundColor Gray
+# Iterate through each environment
+foreach ($environment in $environments) {
+    $processedEnvironments++
+    Write-Host "[$processedEnvironments/$totalEnvironments] Processing Environment: $($environment.DisplayName)" -ForegroundColor Cyan
 
     try {
-        # Get flow runs
-        $runs = Get-FlowRun -FlowName $flow.FlowName
+        # Get all flows in this environment
+        $flows = Get-AdminFlow -EnvironmentName $environment.EnvironmentName
 
-        if ($runs) {
-            # Filter for failed runs in the time window
-            $failedRuns = $runs | Where-Object {
-                $_.Status -eq 'Failed' -and
-                [DateTime]$_.StartTime -gt $timeThreshold
-            }
+        if ($flows) {
+            $envFlowCount = $flows.Count
+            $totalFlows += $envFlowCount
+            Write-Host "  Found $envFlowCount flow(s) in this environment" -ForegroundColor Gray
 
-            if ($failedRuns.Count -gt 0) {
-                $totalFailedFlows++
+            $processedFlows = 0
 
-                $lastFailureTime = ($failedRuns | Sort-Object StartTime -Descending | Select-Object -First 1).StartTime
+            # Check each flow for failures
+            foreach ($flow in $flows) {
+                $processedFlows++
+                Write-Host "  [$processedFlows/$envFlowCount] Checking: $($flow.DisplayName)" -ForegroundColor Gray
 
-                $failedFlowDetails += [PSCustomObject]@{
-                    FlowName = $flow.DisplayName
-                    FlowID = $flow.FlowName
-                    Enabled = $flow.Enabled
-                    FailureCount = $failedRuns.Count
-                    LastFailure = $lastFailureTime
+                try {
+                    # Get flow runs
+                    $runs = Get-AdminFlowRunHistory -EnvironmentName $environment.EnvironmentName -FlowName $flow.FlowName
+
+                    if ($runs) {
+                        # Filter for failed runs in the time window
+                        $failedRuns = $runs | Where-Object {
+                            $_.Status -eq 'Failed' -and
+                            [DateTime]$_.StartTime -gt $timeThreshold
+                        }
+
+                        if ($failedRuns.Count -gt 0) {
+                            $totalFailedFlows++
+
+                            $lastFailureTime = ($failedRuns | Sort-Object StartTime -Descending | Select-Object -First 1).StartTime
+
+                            $failedFlowDetails += [PSCustomObject]@{
+                                Environment = $environment.DisplayName
+                                EnvironmentID = $environment.EnvironmentName
+                                FlowName = $flow.DisplayName
+                                FlowID = $flow.FlowName
+                                Enabled = $flow.Enabled
+                                FailureCount = $failedRuns.Count
+                                LastFailure = $lastFailureTime
+                            }
+
+                            Write-Host "    [FAILED] $($failedRuns.Count) failure(s) - Last: $lastFailureTime" -ForegroundColor Red
+                        }
+                    }
                 }
-
-                Write-Host "  [FAILED] $($failedRuns.Count) failure(s) - Last: $lastFailureTime" -ForegroundColor Red
+                catch {
+                    Write-Warning "    Could not retrieve runs for flow: $($flow.DisplayName). Error: $($_.Exception.Message)"
+                }
             }
+        }
+        else {
+            Write-Host "  No flows found in this environment" -ForegroundColor Gray
         }
     }
     catch {
-        Write-Warning "  Could not retrieve runs for flow: $($flow.DisplayName). Error: $($_.Exception.Message)"
+        Write-Warning "  Could not retrieve flows for environment: $($environment.DisplayName). Error: $($_.Exception.Message)"
     }
+
+    Write-Host ""
 }
 
 Write-Host ""
 
 # Display summary
 Write-Host "=== Summary ===" -ForegroundColor Cyan
+Write-Host "Total Environments Checked: $totalEnvironments" -ForegroundColor White
 Write-Host "Total Flows Checked: $totalFlows" -ForegroundColor White
 Write-Host "Flows with Failures (last $Hours hours): $totalFailedFlows" -ForegroundColor $(if ($totalFailedFlows -gt 0) { 'Red' } else { 'Green' })
 Write-Host ""
