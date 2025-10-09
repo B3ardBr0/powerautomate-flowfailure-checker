@@ -18,6 +18,9 @@ Transcript_*.txt
 .env
 credentials.json
 
+# Personal development journals
+DEVELOPMENT_JOURNAL.md
+
 # Windows thumbnail cache
 Thumbs.db
 
